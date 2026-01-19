@@ -1,0 +1,409 @@
+---
+title: "NFL Salary Cap & Team Performance Analysis"
+author: "Jayden Polansky"
+date: "2025-10-31"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+## Introduction
+
+This analysis explores the relationship between NFL salary cap management and team success from 2011-2024. Specifically, I investigate whether *how* teams distribute their salary cap matters as much as *how much* they spend.
+
+The key metric I use is the **Gini coefficient** — a measure of inequality typically used in economics. Applied here, it quantifies how concentrated a team's salary spending is:
+
+- **High Gini (closer to 1)**: "Star-heavy" approach — a few players get most of the money
+- **Low Gini (closer to 0)**: "Depth-focused" approach — salary spread more evenly
+
+## Setup
+
+### Load Required Packages
+
+```{r load-packages}
+library(nflreadr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(tibble)
+library(ineq)
+library(ggplot2)
+
+# Set ggplot theme for consistent styling
+theme_set(theme_minimal(base_size = 12))
+```
+
+### Load Data
+
+```{r load-data}
+# Salary cap data scraped from Spotrac
+team_cap_2011_2024 <- read.csv("data/team_cap_2011_2024.csv")
+
+# Team performance data (wins, losses, points)
+team_data_2011_2024 <- read.csv("data/team_data_2011_2024.csv")
+```
+
+## Data Preparation
+
+### Process Contract Data
+
+I use the `nflreadr` package to pull contract information, then standardize team names and filter to our analysis period.
+
+```{r process-contracts}
+# Load contract data from nflreadr
+contracts <- load_contracts()
+
+# Lookup table: team nicknames → standard abbreviations
+team_lookup <- tibble::tribble(
+  ~nickname,         ~abbr,
+  "Cardinals",       "ARI",
+  "Falcons",         "ATL",
+  "Ravens",          "BAL",
+  "Bills",           "BUF",
+  "Panthers",        "CAR",
+  "Bears",           "CHI",
+  "Bengals",         "CIN",
+  "Browns",          "CLE",
+  "Cowboys",         "DAL",
+  "Broncos",         "DEN",
+  "Lions",           "DET",
+  "Packers",         "GB",
+  "Texans",          "HOU",
+  "Colts",           "IND",
+  "Jaguars",         "JAX",
+  "Chiefs",          "KC",
+  "Raiders",         "LV",
+  "Chargers",        "LAC",
+  "Rams",            "LAR",
+  "Dolphins",        "MIA",
+  "Vikings",         "MIN",
+  "Patriots",        "NE",
+  "Saints",          "NO",
+  "Giants",          "NYG",
+  "Jets",            "NYJ",
+  "Eagles",          "PHI",
+  "Steelers",        "PIT",
+  "49ers",           "SF",
+  "Seahawks",        "SEA",
+  "Buccaneers",      "TB",
+  "Titans",          "TEN",
+  "Commanders",      "WAS"
+)
+
+# Clean and prepare contract dataset
+player_contracts_2011_2024 <- contracts %>%
+  filter(year_signed >= 2011, year_signed <= 2024) %>%
+  select(player, position, team, year_signed, value, apy, apy_cap_pct) %>%
+  arrange(year_signed) %>%
+  # Handle players signed by multiple teams
+  separate_rows(team, sep = "/") %>%
+  mutate(team = str_trim(team)) %>%
+  # Convert nicknames to abbreviations
+  left_join(team_lookup, by = c("team" = "nickname")) %>%
+  mutate(team = if_else(is.na(abbr), team, abbr)) %>%
+  select(-abbr)
+
+rm(contracts, team_lookup)
+```
+
+### Standardize Team Names
+
+Several teams relocated during this period (Raiders, Chargers, Rams), so I standardize all team abbreviations to their current versions.
+
+```{r standardize-teams}
+# Full team name → abbreviation mapping
+team_map <- tribble(
+  ~team_abbr, ~team_name,
+  "ARI", "Arizona Cardinals",
+  "ATL", "Atlanta Falcons",
+  "BAL", "Baltimore Ravens",
+  "BUF", "Buffalo Bills",
+  "CAR", "Carolina Panthers",
+  "CHI", "Chicago Bears",
+  "CIN", "Cincinnati Bengals",
+  "CLE", "Cleveland Browns",
+  "DAL", "Dallas Cowboys",
+  "DEN", "Denver Broncos",
+  "DET", "Detroit Lions",
+  "GB",  "Green Bay Packers",
+  "HOU", "Houston Texans",
+  "IND", "Indianapolis Colts",
+  "JAX", "Jacksonville Jaguars",
+  "KC",  "Kansas City Chiefs",
+  "LAC", "Los Angeles Chargers",
+  "SD",  "San Diego Chargers",
+  "LAR", "Los Angeles Rams",
+  "STL", "St. Louis Rams",
+  "LV",  "Las Vegas Raiders",
+  "OAK", "Oakland Raiders",
+  "MIA", "Miami Dolphins",
+  "MIN", "Minnesota Vikings",
+  "NE",  "New England Patriots",
+  "NO",  "New Orleans Saints",
+  "NYG", "New York Giants",
+  "NYJ", "New York Jets",
+  "PHI", "Philadelphia Eagles",
+  "PIT", "Pittsburgh Steelers",
+  "SEA", "Seattle Seahawks",
+  "SF",  "San Francisco 49ers",
+  "TB",  "Tampa Bay Buccaneers",
+  "TEN", "Tennessee Titans",
+  "WAS", "Washington Commanders",
+  "WAS", "Washington Redskins",
+  "WAS", "Washington Football Team"
+)
+
+# Convert full names to abbreviations
+team_data_2011_2024 <- team_data_2011_2024 %>%
+  left_join(team_map, by = c("Team" = "team_name")) %>%
+  mutate(Team = team_abbr) %>%
+  select(-team_abbr)
+
+# Standardize relocated team abbreviations to current versions
+team_data_2011_2024 <- team_data_2011_2024 %>%
+  mutate(Team = case_when(
+    Team == "SD"  ~ "LAC",
+    Team == "OAK" ~ "LV",
+    Team == "STL" ~ "LAR",
+    TRUE ~ Team
+  ))
+
+team_cap_2011_2024 <- team_cap_2011_2024 %>%
+  mutate(Team = case_when(
+    Team == "SD"  ~ "LAC",
+    Team == "OAK" ~ "LV",
+    Team == "STL" ~ "LAR",
+    TRUE ~ Team
+  ))
+```
+
+### Calculate Derived Metrics
+
+```{r derived-metrics}
+# Calculate point differential
+team_data_2011_2024$PointDiff <- team_data_2011_2024$PF - team_data_2011_2024$PA
+
+# Calculate previous year's win percentage (for regression control)
+team_data_2011_2024 <- team_data_2011_2024 %>%
+  group_by(Team) %>% 
+  mutate(Prev_win_perc = lag(Win_perc)) %>%
+  ungroup()
+
+# Add 2010 win percentages for 2011 baseline
+prev_win_perc_2010 <- data.frame(
+  Team = c("NE", "NYJ", "MIA", "BUF", "PIT", "BAL", "CLE", "CIN", 
+           "IND", "JAX", "HOU", "TEN", "KC", "LAC", "LV", "DEN", 
+           "PHI", "NYG", "DAL", "WAS", "CHI", "GB", "DET", "MIN", 
+           "ATL", "NO", "TB", "CAR", "SEA", "LAR", "SF", "ARI"),
+  prev = c(0.875, 0.688, 0.438, 0.250, 0.750, 0.750, 0.313, 0.250, 
+           0.625, 0.500, 0.375, 0.375, 0.625, 0.563, 0.500, 0.250, 
+           0.625, 0.625, 0.375, 0.375, 0.688, 0.625, 0.375, 0.375, 
+           0.813, 0.688, 0.625, 0.125, 0.438, 0.438, 0.375, 0.313)
+)
+
+# Fill in 2011 previous win percentages
+team_data_2011_2024 <- team_data_2011_2024 %>%
+  left_join(prev_win_perc_2010, by = "Team") %>%
+  mutate(Prev_win_perc = ifelse(Year == 2011 & is.na(Prev_win_perc), prev, Prev_win_perc)) %>%
+  select(-prev)
+```
+
+### Calculate Gini Coefficients
+
+The Gini coefficient is calculated for each team-year based on the APY (average per year) cap percentage of new contracts signed that year.
+
+```{r calculate-gini}
+# Calculate Gini coefficient and max contract percentage for each team-year
+team_gini <- player_contracts_2011_2024 %>%
+  group_by(year_signed, team) %>%
+  summarize(
+    Gini = ineq(apy_cap_pct, type = "Gini"),
+    Max_contract_pct = max(apy_cap_pct),
+    .groups = "drop"
+  )
+```
+
+### Merge All Data
+
+```{r merge-data}
+# Combine team performance data with salary cap data
+team_data_merged <- left_join(
+  team_data_2011_2024, 
+  team_cap_2011_2024, 
+  by = c("Year", "Team")
+)
+
+# Add Gini metrics
+team_data <- inner_join(
+  team_data_merged, 
+  team_gini,
+  by = c("Year" = "year_signed", "Team" = "team")
+)
+
+# Clean up environment
+rm(prev_win_perc_2010, team_gini, team_map, team_cap_2011_2024, 
+   team_data_2011_2024, team_data_merged)
+```
+
+## Analysis
+
+### Predictive Model
+
+Can we predict a team's win percentage based on salary cap metrics? I build a linear regression model controlling for the previous season's win percentage.
+
+```{r model}
+# Linear model: Win % ~ Previous Win % + Salary Cap Metrics
+model <- lm(
+  Win_perc ~ Prev_win_perc + Gini + Total_Cap + Cap_Space,
+  data = team_data
+)
+
+summary(model)
+```
+
+### Model Validation
+
+How well does the model predict actual outcomes?
+
+```{r model-validation, fig.cap="Predicted vs. Actual Win Percentage"}
+# Add predictions to dataset
+team_data$pred <- predict(model)
+
+# Calculate correlation between predicted and actual
+correlation <- cor(team_data$pred, team_data$Win_perc)
+
+ggplot(team_data, aes(x = pred, y = Win_perc)) +
+  geom_point(alpha = 0.5, color = "#013369") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(
+    title = "Predicted vs. Actual Win Percentage",
+    subtitle = paste("Correlation:", round(correlation, 3)),
+    x = "Predicted Win %",
+    y = "Actual Win %"
+  )
+```
+
+### Salary Inequality and Winning
+
+Does concentrating salary in star players help or hurt?
+
+```{r gini-vs-wins, fig.cap="Gini Coefficient vs. Win Percentage"}
+ggplot(team_data, aes(x = Gini, y = Win_perc)) +
+  geom_point(alpha = 0.5, color = "#013369") +
+  geom_smooth(method = "lm", color = "#D50A0A", se = TRUE) +
+  labs(
+    title = "Salary Inequality vs. Win Percentage",
+    subtitle = "Higher Gini = more concentrated spending on fewer players",
+    x = "Gini Coefficient",
+    y = "Win %"
+  )
+```
+
+```{r max-contract-vs-wins, fig.cap="Highest-Paid Player's Cap % vs. Win Percentage"}
+ggplot(team_data, aes(x = Max_contract_pct, y = Win_perc)) +
+  geom_point(alpha = 0.5, color = "#013369") +
+  geom_smooth(method = "lm", color = "#D50A0A", se = TRUE) +
+  labs(
+    title = "Max Contract Cap % vs. Win Percentage",
+    subtitle = "Does paying a top player more of the cap help winning?",
+    x = "Highest-Paid Player's Cap %",
+    y = "Win %"
+  )
+```
+
+### Spending Strategy Comparison
+
+I categorize teams into three spending strategies based on their Gini coefficient:
+
+```{r strategy-categories}
+team_data <- team_data %>%
+  mutate(strategy = case_when(
+    Gini > quantile(Gini, 0.66) ~ "Star-Heavy",
+    Gini < quantile(Gini, 0.33) ~ "Depth-Spending",
+    TRUE ~ "Balanced"
+  ))
+
+# Average win percentage by strategy
+strategy_summary <- team_data %>%
+  group_by(strategy) %>%
+  summarize(
+    avg_win_pct = mean(Win_perc, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(avg_win_pct))
+
+knitr::kable(strategy_summary, 
+             col.names = c("Strategy", "Avg Win %", "N"),
+             digits = 3)
+```
+
+```{r strategy-boxplot, fig.cap="Win Percentage by Spending Strategy"}
+# Reorder factor for logical display
+team_data <- team_data %>%
+  mutate(strategy_ordered = factor(strategy, 
+                                   levels = c("Star-Heavy", "Balanced", "Depth-Spending")))
+
+ggplot(team_data, aes(x = strategy_ordered, y = Win_perc, fill = strategy_ordered)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values = c("#D50A0A", "#869397", "#013369")) +
+  labs(
+    title = "Win Percentage Distribution by Spending Strategy",
+    x = "Spending Strategy",
+    y = "Win %"
+  ) +
+  theme(legend.position = "none")
+```
+
+### Offense vs. Defense
+
+Does salary concentration affect offensive or defensive performance differently?
+
+```{r offense-defense, fig.show='hold', out.width='50%'}
+# Gini vs Points Scored (Offense)
+ggplot(team_data, aes(x = Gini, y = PF)) +
+  geom_point(alpha = 0.5, color = "#013369") +
+  geom_smooth(method = "lm", color = "#D50A0A") +
+  labs(
+    title = "Salary Inequality vs. Points Scored",
+    x = "Gini Coefficient",
+    y = "Points For"
+  )
+
+# Gini vs Points Allowed (Defense)
+ggplot(team_data, aes(x = Gini, y = PA)) +
+  geom_point(alpha = 0.5, color = "#013369") +
+  geom_smooth(method = "lm", color = "#D50A0A") +
+  labs(
+    title = "Salary Inequality vs. Points Allowed",
+    x = "Gini Coefficient",
+    y = "Points Against"
+  )
+```
+
+## Conclusion
+
+This analysis provides a framework for examining whether salary distribution strategy impacts NFL team success. The Gini coefficient offers a quantitative way to categorize team-building philosophies and test whether "star-heavy" or "depth-focused" approaches produce better results.
+
+Key findings and areas for further investigation:
+
+- The relationship between salary inequality and winning is not statistically significant. Although the graphs show slight correlation between the two, there are too many outside factors to determine a strong relationship, which can be seen by the regression model coefficients.
+- Previous season performance remains a strong predictor of current performance
+- Future work could incorporate position-specific salary distributions or playoff success metrics
+
+---
+
+*Data sources: Spotrac, nflreadr/nflverse*

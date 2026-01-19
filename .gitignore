@@ -1,0 +1,31 @@
+# R/RStudio files
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
+
+# R Markdown cache
+*_cache/
+*_files/
+
+# Knitted output (keep if you want to show rendered results)
+# *.html
+# *.pdf
+
+# Environment files
+.Renviron
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+*.swp
+*~
+
+# Temporary files
+*.tmp
+*.log
